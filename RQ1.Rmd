@@ -1,0 +1,796 @@
+---
+title: 'RQ1 - Trends in mental health care and telehealth use across area deprivation: An analysis of electronic health records from 2016 to 2024'
+author: Grace Ringlein
+date: "01-31-2025"
+output:
+  html_document: 
+    df_print: paged
+  html_notebook:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(lubridate)
+library(marginaleffects)
+library(here)
+library(gtsummary)
+library(readxl)
+```
+
+
+```{r helpers, include=FALSE}
+'%notin%' <- Negate('%in%')
+
+get_num_pats <- function(data) {
+  data %>% pull(cohort_id) %>% unique() %>% length()
+}
+
+get_mode <- function(x) {
+  uniqx <- unique(x)
+  uniqx[which.max(tabulate(match(x, uniqx)))]
+}
+
+
+relabel_program <- function(data) {
+  data %>% mutate(program= factor(ifelse(program=="PSYCH","Mental health care in psychiatry","Mental health care in primary care"),levels=c("Mental health care in primary care","Mental health care in psychiatry")))
+}
+
+relabel_program_v2 <- function(data) {
+  data %>% mutate(program= factor(ifelse(program=="PSYCH","Mental health care\n in psychiatry","Mental health care\n in primary care"),levels=c("Mental health care\n in primary care","Mental health care\n in psychiatry")))
+}
+
+```
+
+```{r load_data}
+data <- readr::read_rds(here("telehealth","data","tele_samples11062024_from2016.rds")) 
+```
+
+```{r}
+top_five_county <- rbind(data$tele_psych_F,data$tele_primary_F) %>% select(contains("county"),cohort_id) %>% unique() %>% count(county) %>% arrange(desc(n)) %>% head(5) %>% pull(county)
+
+
+reg_enc_psych <-data$tele_psych_F %>% 
+  arrange(cohort_id) %>%
+  group_by(cohort_id) %>% 
+  arrange(contact_date,.by_group=TRUE) %>%
+  ungroup()  %>%  
+  mutate(mode_payor_cat = ifelse(is.na(mode_payor_cat), "Other",mode_payor_cat),
+         county_top = 
+           case_when(
+             county %in% top_five_county ~ county,
+             TRUE ~ "Other"))  %>%
+  mutate(ADI_group =
+           factor(case_when(
+             adi_nat <= 25 ~ "Low deprivation",
+             adi_nat <= 75 ~ "Medium deprivation",
+             adi_nat <= 100 ~ "High deprivation",
+             ),levels=c("High deprivation","Medium deprivation","Low deprivation")),
+         time_point = factor(case_when(
+           contact_date < as_date("2019-07-01") ~ "Pre-pandemic",
+           contact_date < as_date("2020-07-01") ~ "Emerging-pandemic",
+           contact_date < as_date("2021-07-01") ~ "Early-pandemic",
+           contact_date < as_date("2024-07-01") ~ "Post-pandemic"),
+           levels = c("Pre-pandemic","Emerging-pandemic", "Early-pandemic","Post-pandemic"))) %>% 
+  group_by(cohort_id) %>% 
+  mutate(
+      in_pre = sum(time_point == "Pre-pandemic") > 0,
+      in_emerging = sum(time_point == "Emerging-pandemic") > 0,
+      in_early = sum(time_point == "Early-pandemic") > 0,
+      in_post = sum(time_point == "Post-pandemic") > 0,
+      in_pre_post = in_pre & in_post) %>% 
+  ungroup()
+         
+  
+reg_enc_primary <- data$tele_primary_F %>% 
+  arrange(cohort_id) %>%
+  group_by(cohort_id) %>% 
+  arrange(contact_date,.by_group=TRUE) %>%
+  ungroup()  %>%  
+  mutate(mode_payor_cat = ifelse(is.na(mode_payor_cat), "Other",mode_payor_cat),
+         county_top = 
+           case_when(
+             county %in% top_five_county ~ county,
+             TRUE ~ "Other"))  %>%
+  mutate(ADI_group =
+           factor(case_when(
+             adi_nat <= 25 ~ "Low deprivation",
+             adi_nat <= 75 ~ "Medium deprivation",
+             adi_nat <= 100 ~ "High deprivation",
+             ),levels=c("High deprivation","Medium deprivation","Low deprivation")),
+         time_point = factor(case_when(
+           contact_date < as_date("2019-07-01") ~ "Pre-pandemic",
+           contact_date < as_date("2020-07-01") ~ "Emerging-pandemic",
+           contact_date < as_date("2021-07-01") ~ "Early-pandemic",
+           contact_date < as_date("2024-07-01") ~ "Post-pandemic"),
+           levels = c("Pre-pandemic","Emerging-pandemic", "Early-pandemic","Post-pandemic"))) %>% 
+  group_by(cohort_id) %>% 
+  mutate(
+      in_pre = sum(time_point == "Pre-pandemic") > 0,
+      in_emerging = sum(time_point == "Emerging-pandemic") > 0,
+      in_early = sum(time_point == "Early-pandemic") > 0,
+      in_post = sum(time_point == "Post-pandemic") > 0,
+      in_pre_post = in_pre & in_post) %>% 
+  ungroup()
+         
+reg_enc_combo <- rbind(reg_enc_psych,reg_enc_primary)
+
+reg_enc_psych <- reg_enc_psych %>%
+  mutate(in_both_cohorts = cohort_id %in% reg_enc_primary$cohort_id) %>% 
+  group_by(cohort_id) %>%
+  mutate(n_visits=n()) %>% 
+  ungroup()
+
+reg_enc_primary <- reg_enc_primary %>%
+  mutate(in_both_cohorts = cohort_id %in% reg_enc_psych$cohort_id)%>%
+  group_by(cohort_id) %>%
+  mutate(n_visits=n()) %>%
+  ungroup()
+```
+
+## How many census block groups? 
+
+### Number of census block groups in the combined primary care + psych 2016-2024 samples:
+
+Overall: 
+```{r}
+reg_enc_combo %>% count(Geoid_2020) %>% nrow()
+```
+
+By ADI group: 
+```{r}
+reg_enc_combo %>% group_by(ADI_group) %>% summarize(n_block_groups=length(unique(Geoid_2020))) 
+```
+
+### Number of census block groups in the primary care 2016-2024 sample:
+
+Overall: 
+```{r}
+reg_enc_primary %>% count(Geoid_2020) %>% nrow() %>% print()
+```
+
+By ADI group: 
+```{r}
+reg_enc_primary %>% group_by(ADI_group) %>% summarize(n_block_groups=length(unique(Geoid_2020))) 
+```
+
+### Number of census block groups in the psych 2016-2024 sample:
+
+Overall:
+```{r}
+reg_enc_psych %>% count(Geoid_2020) %>% nrow()
+```
+
+By ADI group: 
+```{r}
+reg_enc_psych %>% group_by(ADI_group) %>% summarize(n_block_groups=length(unique(Geoid_2020))) 
+
+```
+
+## Distribution of ADI among patients
+```{r adi_dist}
+reg_enc_combo %>% select(cohort_id,adi_nat,ADI_group,program) %>% unique() %>% relabel_program() %>% ggplot() + geom_histogram(aes(x=adi_nat,fill=ADI_group),bins=100) +
+  xlab("ADI (National Percentile) 2020") + theme_bw() + facet_wrap(.~program) + 
+   scale_fill_manual(name="ADI Group",breaks=c("Low deprivation","Medium deprivation","High deprivation"),
+                    values=c("#FABF7B","#E05C5C","#6E005F"))+  theme(legend.position=c(.85,.82),
+        legend.background = element_rect(colour = "black")) + 
+  ylab("N")
+
+ggsave(here("figures","fig_S3_2016-2024cohort.png"))
+```
+
+```{r}
+# get average number of appointments per group per day 
+tmp <- rbind(reg_enc_primary,reg_enc_psych) %>% 
+  group_by(contact_date,program,month,year,ADI_group,time_point, t_months) %>% filter(!weekend) %>%
+  summarize(n=n()) %>%
+  group_by(program,month,year,ADI_group,time_point, t_months) %>%
+  summarize(first_date = min(contact_date),
+           n = mean(n)) %>% ungroup()
+
+
+# average numbers per day in july 2018- july 2019 for comparison 
+tmp_base <- rbind(reg_enc_primary,reg_enc_psych) %>% 
+  filter(contact_date >= as_date("2018-07-01") & contact_date < as_date("2019-07-01")) %>% 
+  group_by(contact_date,program,month,year,ADI_group, t_months) %>% 
+  summarize(n=n()) %>% 
+  group_by(ADI_group,program) %>%
+  summarize(
+           n_base = mean(n)) %>% ungroup()
+
+# join 
+tmp <- tmp %>% left_join(tmp_base,by=c("ADI_group","program")) %>% group_by(ADI_group,program) %>%
+  mutate(n_perc = (n/n_base - 1)* 100) %>% ungroup()
+```
+
+
+```{r}
+# plot number of visits per day for each group (extra figure, not in paper)
+tmp %>% relabel_program() %>% ggplot(aes(x=first_date,y=n,colour=ADI_group)) + geom_point() + geom_line() +  facet_grid(rows=vars(program)) + 
+   geom_vline(xintercept=as_date("2020-03-01"),linetype="dashed") + 
+   scale_x_continuous(breaks=c(as_date("2016-07-01"),as_date("2017-07-01"),as_date("2018-07-01"),as_date("2019-07-01"),as_date("2020-07-01"),as_date("2021-07-01"),as_date("2022-07-01"),as_date("2023-07-01"),as_date("2024-07-01")),
+                     labels = paste("July",2016:2024)) + 
+   scale_colour_manual(name="ADI Group",breaks=c("Low deprivation","Medium deprivation","High deprivation"),
+                    values=c("#FABF7B","#E05C5C","#6E005F"))+
+  theme_bw() +   theme(legend.position=c(.15,.9),axis.text.x = element_text(angle = 60, hjust=1),
+        legend.background = element_rect(colour = "black"),
+        legend.text = element_text(size=8),
+        legend.title = element_text(size=8),
+        legend.key.size = unit(.1, "cm")) + 
+  ylim(c(0,150)) + 
+  ylab("Visits per day") + xlab("")
+ggsave(here("figures","extra_fig_volume_of_care.png"))
+```
+
+
+```{r}
+# plot relative number of visits per day for each group 
+tmp %>% relabel_program_v2() %>% ggplot() +
+  geom_hline(yintercept=0,alpha=.3) + 
+  geom_rect(xmin=as_date("2019-07-01"),xmax=as_date("2021-07-01"),ymin=-Inf,ymax=Inf,fill="#EEEEEE",alpha=.3) + 
+   geom_vline(xintercept=as_date("2019-07-01"),linetype="dotted") + 
+  geom_vline(xintercept=as_date("2020-03-01"),linetype="dashed") + 
+  geom_vline(xintercept=as_date("2021-07-01"),linetype="dotted") + 
+  scale_x_continuous(breaks=c(as_date("2016-07-01"),as_date("2017-07-01"),as_date("2018-07-01"),as_date("2019-07-01"),as_date("2020-07-01"),as_date("2021-07-01"),as_date("2022-07-01"),as_date("2023-07-01"),as_date("2024-07-01")),
+                     labels = paste("July",2016:2024)) + 
+  geom_point(aes(x=first_date,y=n_perc,colour=ADI_group)) + geom_line(aes(x=first_date,y=n_perc,colour=ADI_group)) + facet_grid(rows=vars(program)) + 
+   scale_colour_manual(name="ADI Group",breaks=c("Low deprivation","Medium deprivation","High deprivation"),
+                    values=c("#FABF7B","#E05C5C","#6E005F"))+
+  theme_bw() +   theme(legend.position=c(.15,.9), axis.text.x = element_text(angle = 60, hjust=1),
+       legend.background = element_rect(colour = "black"),
+        legend.text = element_text(size=8),
+        legend.title = element_text(size=8),
+        legend.key.size = unit(.1, "cm")) + 
+  
+  #ylim(c(0,)) + 
+  ylab("% change daily visits\n relative to July 2018-June 2019 average") + xlab("") 
+
+ggsave(here("figures","fig_1.png"),height=6,width=7)
+
+```
+
+
+## Figure S6 Trends in mental health utilization 
+
+```{r}
+# data organized for plots 
+tmp_analysis_nogroup <- rbind(reg_enc_primary,reg_enc_psych) %>% 
+  group_by(contact_date,program,month,year,time_point, t_months,day) %>% 
+  summarize(n=n(),
+            tele = mean(telehealth),
+            hosp=mean(hosp)) %>%
+  group_by(program,t_months) %>% 
+  summarize(first_date = min(contact_date),
+           n = mean(n),
+           hosp=mean(hosp),
+           tele=mean(tele) * 100) %>% ungroup()
+```
+
+
+```{r}
+# panel 1 with legend
+tmp_analysis_nogroup %>% 
+  relabel_program() %>% ggplot() +
+  scale_x_continuous(breaks=c(as_date("2016-07-01"),as_date("2017-07-01"),as_date("2018-07-01"),as_date("2019-07-01"),as_date("2020-07-01"),as_date("2021-07-01"),as_date("2022-07-01"),as_date("2023-07-01"),as_date("2024-07-01")),
+                     labels = paste("July",2016:2024)) + 
+  geom_vline(xintercept=as_date("2020-03-01"),linetype="solid") + 
+  geom_vline(xintercept=as_date("2021-07-01"),linetype="dashed") + 
+  geom_vline(xintercept=as_date("2021-12-01"),linetype="dotted") + 
+  geom_vline(xintercept=as_date("2023-05-01"),linetype="dotdash") + 
+  geom_point(aes(x=first_date,y=n,colour=program)) +
+  geom_line(aes(x=first_date,y=n,colour=program)) + 
+  theme_bw() +   
+  scale_colour_manual(name="Department",values=c("#FFA47F","#1E99E5")) + 
+  ylab("Daily mental health care visits") + xlab("")+   theme(legend.position=c(.2,.75),
+        legend.background = element_rect(colour = "black"),
+        axis.text.x = element_text(angle = 60, hjust=1),
+        legend.text = element_text(size=8),
+        legend.title = element_text(size=8),
+        axis.title.y = element_text(size=8),
+        legend.key.size = unit(.1, "cm"))
+
+ggsave(here("figures","figure_S6_p1_wlegend.png"),width=7,height=2.5)
+```
+
+
+```{r}
+# panel 1 with/o legend
+tmp_analysis_nogroup %>% 
+  relabel_program() %>% ggplot() +
+  geom_vline(xintercept=as_date("2020-03-01"),linetype="solid") + 
+  geom_vline(xintercept=as_date("2021-07-01"),linetype="dashed") + 
+  geom_vline(xintercept=as_date("2021-12-01"),linetype="dotted") + 
+  geom_vline(xintercept=as_date("2023-05-01"),linetype="dotdash") + 
+  scale_x_continuous(breaks=c(as_date("2016-07-01"),as_date("2017-07-01"),as_date("2018-07-01"),as_date("2019-07-01"),as_date("2020-07-01"),as_date("2021-07-01"),as_date("2022-07-01"),as_date("2023-07-01"),as_date("2024-07-01")),
+                     labels = paste("July",2016:2024)) + 
+
+  geom_point(aes(x=first_date,y=n,colour=program)) +
+  geom_line(aes(x=first_date,y=n,colour=program)) + 
+  theme_bw() +   
+  scale_colour_manual(name="Department",values=c("#FFA47F","#1E99E5")) + 
+  ylab("Daily mental health care visits") + xlab("")+   
+  theme(legend.position="none",
+        legend.background = element_rect(colour = "black"),
+        legend.text = element_text(size=8),axis.text.x = element_text(angle = 60, hjust=1),
+        legend.title = element_text(size=8),
+        axis.title.y = element_text(size=8),
+        legend.key.size = unit(.1, "cm"))
+
+ggsave(here("figures","figure_S6_p1_wolegend.png"),width=7,height=2.5)
+```
+
+
+```{r}
+# panel 2 with out legend
+
+tmp_analysis_nogroup %>% 
+  relabel_program() %>% ggplot() +
+  scale_x_continuous(breaks=c(as_date("2016-07-01"),as_date("2017-07-01"),as_date("2018-07-01"),as_date("2019-07-01"),as_date("2020-07-01"),as_date("2021-07-01"),as_date("2022-07-01"),as_date("2023-07-01"),as_date("2024-07-01")),
+                     labels = paste("July",2016:2024)) + 
+
+  geom_vline(xintercept=as_date("2020-03-01"),linetype="solid") + 
+  geom_vline(xintercept=as_date("2021-07-01"),linetype="dashed") + 
+  geom_vline(xintercept=as_date("2021-12-01"),linetype="dotted") + 
+  geom_vline(xintercept=as_date("2023-05-01"),linetype="dotdash") + 
+  geom_point(aes(x=first_date,y=tele,colour=program)) +
+  geom_line(aes(x=first_date,y=tele,colour=program)) + 
+  theme_bw() +   
+  scale_colour_manual(name="Department",values=c("#FFA47F","#1E99E5")) + 
+  theme(legend.position="none",
+        legend.background = element_rect(colour = "black"),axis.text.x = element_text(angle = 60, hjust=1),
+        legend.text = element_text(size=8),
+        legend.title = element_text(size=8),
+        axis.title.y = element_text(size=8),
+        legend.key.size = unit(.1, "cm")) + 
+  ylab("% telehealth visits") + xlab("")
+ggsave(here("figures","figure_S6_p2_wolegend.png"),width=7,height=2.5)
+```
+
+
+```{r}
+# panel 2 with legend
+tmp_analysis_nogroup %>% 
+  relabel_program() %>% ggplot() +
+  scale_x_continuous(breaks=c(as_date("2016-07-01"),as_date("2017-07-01"),as_date("2018-07-01"),as_date("2019-07-01"),as_date("2020-07-01"),as_date("2021-07-01"),as_date("2022-07-01"),as_date("2023-07-01"),as_date("2024-07-01")),
+                     labels = paste("July",2016:2024)) + 
+
+  geom_vline(xintercept=as_date("2020-03-01"),linetype="solid") + 
+  geom_vline(xintercept=as_date("2021-07-01"),linetype="dashed") + 
+  geom_vline(xintercept=as_date("2021-12-01"),linetype="dotted") + 
+  geom_vline(xintercept=as_date("2023-05-01"),linetype="dotdash") + 
+  geom_point(aes(x=first_date,y=tele,colour=program)) +
+  geom_line(aes(x=first_date,y=tele,colour=program)) + 
+  theme_bw() +   
+  scale_colour_manual(name="Department",values=c("#FFA47F","#1E99E5")) + 
+  theme(legend.position=c(.2,.75),
+        legend.background = element_rect(colour = "black"),axis.text.x = element_text(angle = 60, hjust=1),
+        legend.text = element_text(size=8),
+        legend.title = element_text(size=8),
+        axis.title.y = element_text(size=8),
+        legend.key.size = unit(.1, "cm")) + 
+  ylab("% telehealth visits") + xlab("")
+ggsave(here("telehealth","telehealthRR","figures","figure_S6_p2_wlegend.png"),width=7,height=2.5)
+```
+
+
+```{r fig.width=7,fig.height=2.5}
+hosp <- readr::read_csv(here("data","externaldata","MDCOVID19_TotalCurrentlyHospitalized_AdultandPediatric_AcuteAndICU_10222024.csv"),show_col_types=FALSE) %>%
+  mutate(first_date = lubridate::as_date(ReportDate)) %>% filter(Total!=0)
+```
+
+
+```{r fig.width=7,fig.height=2.5}
+# panel 3
+hosp %>%
+  ggplot() + 
+  geom_vline(xintercept=as_date("2020-03-01"),linetype="solid") + 
+  geom_vline(xintercept=as_date("2021-07-01"),linetype="dashed") + 
+  geom_vline(xintercept=as_date("2021-12-01"),linetype="dotted") + 
+  geom_vline(xintercept=as_date("2023-05-01"),linetype="dotdash") + 
+  geom_line(aes(x=first_date,y=Total),colour="#810000") + 
+  annotate(geom="label",x=as_date("2019-11-01"),y=4500,label="March 2020:\nFirst COVID-19 cases detected in MD,\n State of Emergency in MD is declared",size=2) + 
+  annotate(geom="label",x=as_date("2021-5-01"),y=6750,label="July 2021:\n State of Emergency in MD ends,\n Delta variant detected in MD",size=2) + 
+  annotate(geom="label",x=as_date("2022-3-01"),y=4500,label="December 2021:\n Omicron variant detected in MD",size=2) +
+  
+  annotate(geom="label",x=as_date("2023-9-01"),y=2750,label="May 2023:\n National COVID-19 \n Emergency Declaration Ends",size=2) +
+  #annotate(geom="label",x=as_date("2020-03-25"),y=2000,label="(Hospitalization data is available from 3/25/20)",size=2) +
+ 
+  theme_bw() +    
+  theme(axis.title.y = element_text(size=8),axis.text.x = element_text(angle = 60, hjust=1)) +   scale_y_continuous(limits=c(0,7500))+
+  
+   scale_x_continuous(breaks=c(as_date("2016-07-01"),as_date("2017-07-01"),as_date("2018-07-01"),as_date("2019-07-01"),as_date("2020-07-01"),as_date("2021-07-01"),as_date("2022-07-01"),as_date("2023-07-01"),as_date("2024-07-01")),
+                     labels = paste("July",2016:2024),limits = c(min(tmp_analysis_nogroup$first_date),max(tmp_analysis_nogroup$first_date))) + 
+
+  ylab("Daily COVID-19 Hospital Beds") + xlab("")
+
+ggsave(here("telehealth","telehealthRR","figures","figure_S6_p3.png"),width=7,height=2.5)
+```
+
+
+# Descriptives
+
+## Descriptive tables
+
+### stats on number of visits  per patient 
+```{r}
+reg_enc_psych %>% count(cohort_id) %>% summarize(median(n),mean(n),min(n),max(n))
+reg_enc_primary %>% count(cohort_id) %>% summarize(median(n),mean(n),min(n),max(n))
+```
+
+### Sample descriptives stratified by primary versus PSYCH (all time)
+
+```{r descriptives}
+var_labels_desc=list(
+    "telehealth" = "Telehealth",
+    "in_both_cohorts" = "Patients in both primary care and psychiatry cohorts",
+    "n_visits" = "Number of visits per patient",
+    "any_tele" = "Any Telehealth Appointments",
+    "in_pre" = "Patient seen during pre-pandemic",
+    "in_post" = "Patient seen during post-pandemic",
+    "in_emerging" = "Patient seen during emerging pandemic",
+    "in_early" = "Patient seen during early pandemic",
+    "in_pre_post" = "Patient seen both pre- and post- pandemic",
+    "marital_status"="Marital Status",
+    "time_point" = "Time Period",
+    "gender"="Gender",
+    "race"="Race",
+    "ethnicity"="Ethnicity",
+    "urban" = "Urbanicity",
+    "age_cat"="Age",
+    "age_first_visit" = "Age at First Visit",
+    "ADI_group" = "Area deprivation index group",
+    "adi_nat" = "Area deprivation index National Percentile 2020",
+    "employ" = "Employment",
+    "mode_payor_cat" = "Insurance",
+    "co_anx" = "Comorbid Anxiety",
+    "co_sud" = "Comorbid Substance Use Disorder",
+    "day" = "Day of Week",
+    "daytime_grp" = "Time of Day",
+    "county_top" = "County")
+
+var_demo_list=c("in_both_cohorts",
+                "ADI_group",
+               "gender",
+               "age_cat",
+               "race",
+               "ethnicity",
+               "marital_status",
+               "employ",
+               "mode_payor_cat",
+               "urban",
+               "co_anx",
+               "co_sud",
+               "county_top",
+               "in_pre",
+               "in_emerging",
+               "in_early",
+               "in_post",
+               "in_pre_post",
+               "n_visits")
+
+psych_demo <- reg_enc_psych %>% 
+  filter(!duplicated(cohort_id)) %>%
+  select(all_of(var_demo_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1))%>%
+  modify_header(label ~ "Characteristic",all_stat_cols() ~ "PSYCH all, N={N}")
+
+primary_demo <- reg_enc_primary %>%
+  filter(!duplicated(cohort_id)) %>%
+  select(all_of(var_demo_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1)) %>%
+  modify_header(label ~ "Characteristic",all_stat_cols() ~ "primary all, N={N}")
+
+psych_pre_demo <- reg_enc_psych %>%
+  filter(time_point == "Pre-pandemic") %>%
+  filter(!duplicated(cohort_id)) %>%
+  select(all_of(var_demo_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1)) %>%
+  modify_header(label ~ "Characteristic",all_stat_cols() ~ "PSYCH pre, N={N}")
+
+psych_post_demo <- reg_enc_psych %>%
+  filter(time_point == "Post-pandemic") %>%
+  filter(!duplicated(cohort_id)) %>%
+  select(all_of(var_demo_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1)) %>%
+  modify_header(label ~ "Characteristic",all_stat_cols() ~ "PSYCH post, N={N}")
+
+primary_pre_demo <- reg_enc_primary %>%
+  filter(time_point == "Pre-pandemic") %>%
+  filter(!duplicated(cohort_id)) %>%
+  select(all_of(var_demo_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1)) %>%
+  modify_header(label ~ "Characteristic",all_stat_cols() ~ "primary pre, N={N}")
+
+primary_post_demo <- reg_enc_primary %>%
+  filter(time_point == "Post-pandemic") %>%
+  filter(!duplicated(cohort_id)) %>%
+  select(all_of(var_demo_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1)) %>%
+  modify_header(label ~ "Characteristic",all_stat_cols() ~ "primary post, N={N}")
+
+
+psych_emerging_demo <- reg_enc_psych %>%
+  filter(time_point == "Emerging-pandemic") %>%
+  filter(!duplicated(cohort_id)) %>%
+  select(all_of(var_demo_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1)) %>%
+  modify_header(label ~ "Characteristic",all_stat_cols() ~ "Psych emerging, N={N}")
+
+
+primary_emerging_demo <- reg_enc_primary %>%
+  filter(time_point == "Emerging-pandemic") %>%
+  filter(!duplicated(cohort_id)) %>%
+  select(all_of(var_demo_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1)) %>%
+  modify_header(label ~ "Characteristic",all_stat_cols() ~ "primary emerging, N={N}")
+
+
+psych_early_demo <- reg_enc_psych %>%
+  filter(time_point == "Early-pandemic") %>%
+  filter(!duplicated(cohort_id)) %>%
+  select(all_of(var_demo_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1))  %>%
+  modify_header(label ~ "Characteristic",all_stat_cols() ~ "PSYCH early, N={N}")
+
+
+primary_early_demo <- reg_enc_primary %>%
+  filter(time_point == "Early-pandemic") %>%
+  filter(!duplicated(cohort_id)) %>%
+  select(all_of(var_demo_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1)) %>%
+  modify_header(label ~ "Characteristic",all_stat_cols() ~ "primary early, N={N}")
+
+
+t1 <- tbl_merge(list(primary_demo,primary_pre_demo, primary_emerging_demo,primary_early_demo,  primary_post_demo,psych_demo,psych_pre_demo,psych_emerging_demo,psych_early_demo,  psych_post_demo))
+t1 
+
+```
+
+### median number of visits per patient for each time period (include in Table 1)
+
+```{r descriptives_stt} 
+
+reg_enc_combo %>% group_by(program,cohort_id) %>% summarize(n_visits=n()) %>% group_by(program) %>% summarize(n_pats = n(),median_visits = median(n_visits),q1=quantile(n_visits,prob=.25),q3=quantile(n_visits,prob=.75))
+
+
+reg_enc_combo %>% group_by(program,cohort_id,time_point) %>% summarize(n_visits=n()) %>% group_by(program,time_point) %>% summarize(n_pats = n(),median_visits = median(n_visits),q1=quantile(n_visits,prob=.25),q3=quantile(n_visits,prob=.75))
+```
+
+
+### telehealth numbers visits (also in Table 1)
+
+```{r}
+
+var_enc_list=c("telehealth")
+
+psych_enc <- reg_enc_psych %>%
+  select(all_of(var_enc_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1)) %>%
+  modify_header(label ~ "Characteristic",all_stat_cols() ~ "PSYCH all, N={N}")
+
+primary_enc <- reg_enc_primary %>%
+  select(all_of(var_enc_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1)) %>%
+  modify_header(label ~ "Characteristic",all_stat_cols() ~ "primary all, N={N}")
+
+
+psych_pre_enc <- reg_enc_psych %>%
+  filter(time_point == "Pre-pandemic") %>%
+  select(all_of(var_enc_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1)) %>%
+  modify_header(label ~ "Characteristic",all_stat_cols() ~ "PSYCH pre, N={N}")
+
+psych_early_enc <- reg_enc_psych %>%
+  filter(time_point == "Early-pandemic") %>%
+  select(all_of(var_enc_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1)) %>%
+  modify_header(label ~ "Characteristic",all_stat_cols() ~ "PSYCH early, N={N}")
+
+
+psych_post_enc <- reg_enc_psych %>%
+  filter(time_point == "Post-pandemic") %>%
+  select(all_of(var_enc_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1)) %>%
+  modify_header(label ~ "Characteristic",all_stat_cols() ~ "PSYCH post, N={N}")
+
+psych_emerging_enc <- reg_enc_psych %>%
+  filter(time_point == "Emerging-pandemic") %>%
+  select(all_of(var_enc_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1)) %>%  modify_header(label ~ "Characteristic",all_stat_cols() ~ "PSYCH emerging, N={N}")
+
+primary_pre_enc <- reg_enc_primary %>%
+  filter(time_point == "Pre-pandemic") %>%
+  select(all_of(var_enc_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1))%>%
+  modify_header(label ~ "Characteristic",all_stat_cols() ~ "primary pre, N={N}")
+
+primary_early_enc <- reg_enc_primary %>%
+  filter(time_point == "Early-pandemic") %>%
+  select(all_of(var_enc_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1))%>%
+  modify_header(label ~ "Characteristic",all_stat_cols() ~ "primary early, N={N}")
+
+primary_post_enc <- reg_enc_primary %>%
+  filter(time_point == "Post-pandemic") %>%
+  select(all_of(var_enc_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1)) %>%
+  modify_header(label ~ "Characteristic",all_stat_cols() ~ "primary post, N={N}")
+
+primary_emerging_enc <- reg_enc_primary %>%
+  filter(time_point == "Emerging-pandemic") %>%
+  select(all_of(var_enc_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1)) %>%
+  modify_header(label ~ "Characteristic",all_stat_cols() ~ "primary emerging, N={N}")
+
+tenc <- tbl_merge(list(primary_enc,primary_pre_enc, primary_emerging_enc,primary_early_enc, primary_post_enc,psych_enc,psych_pre_enc,psych_emerging_enc, psych_early_enc, psych_post_enc))
+tenc
+```
+
+## Table S1
+
+```{r}
+psych_ADI <- reg_enc_psych %>% 
+  filter(!duplicated(cohort_id)) %>%
+  select(all_of(var_demo_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1),by="ADI_group") 
+
+primary_ADI <- reg_enc_primary %>%
+  filter(!duplicated(cohort_id)) %>%
+  select(all_of(var_demo_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1),by="ADI_group") 
+
+final_ADI_tbl <- tbl_merge(list(primary_ADI,psych_ADI), tab_spanner = c("**Mental health care in primary care**", "**Mental health care in psychiatry**"))
+
+final_ADI_tbl
+
+```
+
+# RQ-1 Analysis
+```{r}
+tmp_analysis <- rbind(reg_enc_primary,reg_enc_psych) %>% 
+  group_by(contact_date,program,month,year,ADI_group,time_point, t_weeks,day) %>% 
+  filter(!weekend) %>%
+  summarize(n =n()) %>% 
+  ungroup() %>% filter(time_point !="Emerging-pandemic",time_point !="Early-pandemic") %>%
+  mutate(t_weeks = t_weeks/52)
+```
+
+```{r}
+tmp_analysis %>% group_by(time_point) %>% summarize(min(t_weeks),max(t_weeks))
+```
+
+
+```{r}
+tmp_primary <- filter(tmp_analysis,program=="primary")%>% droplevels()
+
+tmp_psych <- filter(tmp_analysis,program=="PSYCH") %>% droplevels()
+
+tmp_psych$month <- relevel(factor(tmp_psych$month,ordered=FALSE), ref = "Jul")
+
+tmp_primary$month <- relevel(factor(tmp_primary$month,ordered=FALSE), ref = "Jul")
+
+
+formula <- as.formula("n ~ time_point*ADI_group*I(t_weeks-5) + factor(day,ordered=FALSE)+ factor(month,ordered=FALSE)")
+ 
+m0_psych_nb<- MASS::glm.nb(formula,tmp_psych)
+m0_primary_nb<- MASS::glm.nb(formula,tmp_primary)
+
+m0_primary_nb_table <- tbl_regression(m0_primary_nb,exponentiate=TRUE,pvalue_fun = label_style_pvalue(digits = 2))
+m0_psych_nb_table <- tbl_regression(m0_psych_nb,exponentiate=TRUE,pvalue_fun = label_style_pvalue(digits = 2))
+
+order <- c("time_point", "I(t_weeks - 5)", "ADI_group","time_point:I(t_weeks - 5)", "time_point:ADI_group",  "ADI_group:I(t_weeks - 5)", "time_point:ADI_group:I(t_weeks - 5)","factor(day, ordered = FALSE)", "factor(month, ordered = FALSE)") 
+
+m0_primary_nb_table_out <- m0_primary_nb_table$table_body %>%
+  select(variable,label,estimate,conf.low,conf.high,p.value) %>%
+  mutate(variable=factor(variable,levels=order) ) %>%
+  arrange(variable) %>% mutate(estimate = round(estimate,2),
+                             conf.low = round(conf.low,2),
+                             conf.high = round(conf.high,2),
+                            pround2 = round(p.value,2))
+
+m0_psych_nb_table_out <- m0_psych_nb_table$table_body %>%
+  select(variable,label,estimate,conf.low,conf.high,p.value) %>%
+  mutate(variable=factor(variable,levels=order) ) %>% 
+  arrange(variable) %>% mutate(estimate = round(estimate,2),
+                             conf.low = round(conf.low,2),
+                             conf.high = round(conf.high,2),
+                            pround2 = round(p.value,2))
+```
+
+### two parts of table S2
+```{r}
+m0_primary_nb_table_out
+m0_psych_nb_table_out
+
+```
+
+### linear combinations (table S3)
+```{r}
+marginal_means_primary_nb <-avg_predictions(m0_primary_nb, by=c("ADI_group","time_point")) %>%
+  mutate(program="Mental health in primary care",
+         estimating = "mean (average number of visits-per-day during time period)",
+         estimate_pretty = style_ratio(estimate,digits=2),
+         conf_pretty = paste0(style_ratio(conf.low,digits=2),", ",style_ratio(conf.high,digits=2)),
+        p.value_rounded = style_pvalue(p.value,digits = 2)) %>% 
+  relocate(program,estimating,time_point,ADI_group,estimate_pretty,conf_pretty,p.value_rounded,estimate,conf.low,conf.high,p.value) %>% as_tibble()
+
+marginal_means_psych_nb <-avg_predictions(m0_psych_nb, by=c("ADI_group","time_point")) %>%
+  mutate(program="Mental health in psychiatry",
+  estimating = "mean (average number of visits-per-day during time period)",
+        estimate_pretty = style_ratio(estimate,digits=2),
+         conf_pretty = paste0(style_ratio(conf.low,digits=2),", ",style_ratio(conf.high,digits=2)),
+        p.value_rounded = style_pvalue(p.value,digits = 2)) %>% 
+  relocate(program,estimating,time_point,ADI_group,estimate_pretty,conf_pretty,p.value_rounded,estimate,conf.low,conf.high,p.value) %>% as_tibble()
+
+marginal_slopes_primary_nb <-avg_comparisons(m0_primary_nb, variables = "t_weeks",by=c("time_point","ADI_group"),comparison="lnratioavg",transform="exp") %>%
+  mutate(program="Mental health in primary care",
+         estimating = "slope (change in visits-per-day over 1 year in time period)",
+         perc_change = round((estimate - 1)*100,1),
+         perc_change_conf.low = round((conf.low - 1)*100,1),
+         perc_change_conf.high = round((conf.high -1)*100,1),p.value_rounded =style_pvalue(p.value,digits = 2),
+          conf_pretty = paste0(perc_change_conf.low,", ",perc_change_conf.high)) %>% 
+  relocate(program,estimating,time_point,ADI_group,perc_change,conf_pretty,perc_change_conf.low,perc_change_conf.high,p.value_rounded,estimate,conf.low,conf.high,p.value) %>% as_tibble()
+
+marginal_slopes_psych_nb <-avg_comparisons(m0_psych_nb,  variables = "t_weeks",by=c("time_point","ADI_group"),comparison="lnratioavg",transform="exp")%>%
+  mutate(program="Mental health in psychiatry",
+         estimating = "slope (change in visits-per-day over 1 year in time period)",
+         perc_change = round((estimate - 1)*100,1),
+         perc_change_conf.low = round((conf.low - 1)*100,1),
+         perc_change_conf.high = round((conf.high -1)*100,1),p.value_rounded = style_pvalue(p.value,digits = 2),conf_pretty = paste0(perc_change_conf.low,", ",perc_change_conf.high)) %>% 
+  relocate(program,estimating,time_point,ADI_group,perc_change,conf_pretty,perc_change_conf.low,perc_change_conf.high,p.value_rounded,estimate,conf.low,conf.high,p.value)  %>% as_tibble()
+
+marginal_means_primary_nb
+marginal_means_psych_nb
+marginal_slopes_primary_nb
+marginal_slopes_psych_nb
+```
+
+### supplemental analysis (no linear trends, just pre-post by group comparison)
+```{r}
+formula_base <- as.formula("n ~ time_point*ADI_group")
+ 
+m0_psych_nb_base<- MASS::glm.nb(formula_base,tmp_psych)
+m0_primary_nb_base<- MASS::glm.nb(formula_base,tmp_primary)
+
+m0_primary_nb_table_base <- tbl_regression(m0_primary_nb_base,exponentiate=TRUE,pvalue_fun = label_style_pvalue(digits = 2))
+m0_psych_nb_table_base <- tbl_regression(m0_psych_nb_base,exponentiate=TRUE,pvalue_fun = label_style_pvalue(digits = 2))
+m0_primary_nb_table_base
+m0_psych_nb_table_base
+
+pre_post_compare_primary_base <- avg_comparisons(m0_primary_nb_base, variables = "time_point",by=c("ADI_group"),comparison="lnratioavg",transform="exp")
+
+pre_post_compare_psych_base <- avg_comparisons(m0_psych_nb_base, variables = "time_point",by=c("ADI_group"),comparison="lnratioavg",transform="exp")
+
+pre_post_compare_primary_base
+pre_post_compare_psych_base
+```
+
+
+```{r}
+writexl::write_xlsx(list(table_1_p1_visit_level = gtsummary::as_tibble(tenc),
+                         table_1_p2_pat_level= gtsummary::as_tibble(t1),
+                         table_S1_by_ADI=gtsummary::as_tibble(final_ADI_tbl),
+                         
+                         table_S2_primarycare = gtsummary::as_tibble(m0_primary_nb_table_out),
+                         table_S2_psychiatry = gtsummary::as_tibble(m0_psych_nb_table_out),
+                                             
+                         base_primarycare = gtsummary::as_tibble(m0_primary_nb_table_base),
+                         base_psychiatry = gtsummary::as_tibble(m0_psych_nb_table_base),
+                         
+                         tableS3_part1_means_primarycare = marginal_means_primary_nb,
+                         tableS3_part2_slopes_primarycare = marginal_slopes_primary_nb,
+                         tableS3_p3_oneyear_primarycare = one_year_compare_primary, 
+                         tableS3_p4_pre_post_primarycare = pre_post_compare_primary,
+                        
+                         
+                         tableS3_part1_means_psychiatry =marginal_means_psych_nb,
+                         tableS3_part2_slopes_psychiatry =marginal_slopes_psych_nb,
+                         tableS3_p3_oneyear_psych = one_year_compare_psych, 
+                         tableS3_p4_pre_post_psych = pre_post_compare_psych),
+                    path= here("RQ1-tables.xlsx"))
+```
+
+
+

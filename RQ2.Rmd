@@ -1,0 +1,780 @@
+---
+title:  'RQ2 - Trends in mental health care and telehealth use across area deprivation: An analysis of electronic health records from 2016 to 2024'
+author: Grace Ringlein
+date: "01-31-2025"
+output:
+  html_document: 
+    df_print: paged
+  html_notebook:
+    df_print: paged
+---
+
+```{r message=FALSE, warning=FALSE}
+library(gtsummary)
+library(tidyverse)
+library(lubridate)
+library(effects)
+library(geepack)
+library(here)
+library(readxl)
+
+relabel_program <- function(data) {
+  data %>% mutate(program= factor(ifelse(program=="PSYCH","Mental health care in psychiatry","Mental health care in primary care"),levels=c("Mental health care in primary care","Mental health care in psychiatry")))
+}
+```
+
+```{r load_data}
+data <- readr::read_rds(here("telehealth","data","tele_samples11062024.rds"))
+
+top_five_county <- rbind(data$tele_psych_F,data$tele_primary_F) %>% select(contains("county"),cohort_id) %>% unique() %>% count(county) %>% arrange(desc(n)) %>% head(5) %>% pull(county)
+
+reg_enc_psych <-data$tele_psych_F %>%
+  arrange(cohort_id) %>%
+  group_by(cohort_id) %>% 
+  arrange(contact_date,.by_group=TRUE) %>%
+  ungroup() %>%
+mutate(time_point =
+      case_when(contact_date >= lubridate::as_date("2023-07-01") ~ "Y4",
+                contact_date >= lubridate::as_date("2022-07-01") ~ "Y3",
+                contact_date >= lubridate::as_date("2021-07-01") ~ "Y2",
+                contact_date >= lubridate::as_date("2020-07-01") ~ "Y1")) %>% 
+   mutate(ADI_group = 
+            case_when(
+              adi_nat <= 25 ~ "Low deprivation",
+              adi_nat <= 75 ~ "Medium deprivation",
+              adi_nat <= 100 ~ "High deprivation",
+              ), county_top = case_when(county %in% top_five_county ~ county,
+               TRUE ~ "Other"))%>% 
+  rename(hosp=hosp_weeks)
+
+reg_enc_primary <- data$tele_primary_F %>%
+  arrange(cohort_id) %>%
+  group_by(cohort_id) %>% 
+  arrange(contact_date,.by_group=TRUE) %>%
+   ungroup()%>%
+mutate(time_point =
+      case_when(contact_date >= lubridate::as_date("2023-07-01") ~ "Y4",
+                contact_date >= lubridate::as_date("2022-07-01") ~ "Y3",
+                contact_date >= lubridate::as_date("2021-07-01") ~ "Y2",
+                contact_date >= lubridate::as_date("2020-07-01") ~ "Y1"))%>% 
+   mutate(ADI_group = 
+            case_when(
+              adi_nat <= 25 ~ "Low deprivation",
+              adi_nat <= 75 ~ "Medium deprivation",
+              adi_nat <= 100 ~ "High deprivation",
+              ), county_top = case_when(county %in% top_five_county ~ county,
+               TRUE ~ "Other")) %>% 
+  rename(hosp=hosp_weeks)
+
+reg_enc_psych <- reg_enc_psych %>% 
+  mutate(in_both_cohorts = cohort_id %in% reg_enc_primary$cohort_id) %>%
+  group_by(cohort_id) %>% mutate(n_visits=n(),
+         in_Y1 = sum(time_point=="Y1")>0,
+         in_Y2 = sum(time_point=="Y2")>0,
+         in_Y3 = sum(time_point=="Y3")>0,
+         in_Y4 = sum(time_point=="Y4")>0) %>%
+  ungroup() %>% 
+  droplevels()
+
+reg_enc_primary <- reg_enc_primary %>%
+  mutate(in_both_cohorts = cohort_id %in% reg_enc_psych$cohort_id)%>%
+  group_by(cohort_id) %>%
+  mutate(n_visits=n(),
+         in_Y1 = sum(time_point=="Y1")>0,
+         in_Y2 = sum(time_point=="Y2")>0,
+         in_Y3 = sum(time_point=="Y3")>0,
+         in_Y4 = sum(time_point=="Y4")>0) %>%
+  ungroup() %>% 
+  droplevels()
+
+```
+
+```{r}
+relevel_for_analysis <- function(data){
+  data$mode_payor_cat<- relevel(factor(data$mode_payor_cat), ref = "Private")
+  data$age_cat <- relevel(factor(data$age_cat), ref = "65+")
+  data$gender <- relevel(factor(data$gender), ref = "Male")
+  data$employ <- relevel(data$employ, ref = "Full Time")
+  data$ADI_group <- relevel(factor(data$ADI_group), ref = "High deprivation")
+  data$race <- relevel(factor(data$race),ref="Black")
+  data$ethnicity <- relevel(factor(data$ethnicity),ref="Not Hispanic")
+  data$marital_status <- relevel(data$marital_status,ref="Married")
+  data$month <- relevel(factor(data$month,ordered=FALSE), ref = "Jul")
+  data$day <- relevel(factor(data$day,ordered=FALSE), ref = "Mon")
+  return(data)
+}
+
+reg_enc_psych <- relevel_for_analysis(reg_enc_psych)%>%
+  mutate(t_months = t_months/12,
+         t_weeks = t_weeks/52)
+
+reg_enc_primary <- relevel_for_analysis(reg_enc_primary)%>%
+  mutate(t_months = t_months/12,
+         t_weeks = t_weeks/52)
+
+reg_enc_primary$cohort_id <- factor(reg_enc_primary$cohort_id)
+reg_enc_psych$cohort_id <- factor(reg_enc_psych$cohort_id)
+```
+
+
+
+## Descriptives
+
+### Table S4 (patient level characteristics)
+```{r descriptives}
+var_labels_desc=list(
+  "telehealth" = "Telehealth",
+  "in_both_cohorts" = "Patients in both primary care and psychiatry cohorts",
+  "n_visits" = "Number of visits per patient",
+  "any_tele" = "Any Telehealth Appointments",
+  "in_Y1" = "Patients seen July 2020- June 2021",
+  "in_Y2" = "Patients seen July 2021- June 2022",
+  "in_Y3" = "Patients seen July 2022- June 2023",
+  "in_Y4" = "Patients seen July 2023- June 2024",
+  "marital_status"="Marital Status",
+  "time_point" = "Time Period",
+  "gender"="Gender",
+  "race"="Race",
+  "ethnicity"="Ethnicity",
+  "urban" = "Urbanicity",
+  "age_cat"="Age",
+  "age_first_visit" = "Age at First Visit",
+  "ADI_group" = "Area deprivation index group",
+  "adi_nat" = "Area deprivation index National Percentile 2020",
+  "employ" = "Employment",
+  "mode_payor_cat" = "Insurance",
+  "co_anx" = "Comorbid Anxiety",
+  "co_sud" = "Comorbid mainstance Use Disorder",
+  "day" = "Day of Week",
+  "daytime_grp" = "Time of Day",
+  "county_top" = "County")
+  
+var_demo_list=c(
+  "in_both_cohorts",
+  "n_visits",
+  "adi_nat",
+  "ADI_group",
+  "in_Y1",
+  "in_Y2",
+  "in_Y3",
+  "in_Y4",
+  "gender",
+  "age_cat",
+  "race",
+  "ethnicity",
+  "marital_status",
+  "employ",
+  "mode_payor_cat",
+  "urban",
+  "co_anx",
+  "co_sud",
+  "county_top")
+  
+  
+psych_demo <- reg_enc_psych %>% 
+  filter(!duplicated(cohort_id)) %>%
+  select(all_of(var_demo_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1)) %>% 
+  modify_header(label ~ "Characteristic",all_stat_cols() ~ "PSYCH all, N={N}")
+
+psych_Y1_demo <- reg_enc_psych %>%
+  filter(time_point == "Y1") %>%
+  filter(!duplicated(cohort_id)) %>%
+  select(all_of(var_demo_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1))%>% 
+  modify_header(label ~ "Characteristic",all_stat_cols() ~ "PSYCH Y1, N={N}")
+
+psych_Y2_demo <- reg_enc_psych %>%
+  filter(time_point == "Y2") %>%
+  filter(!duplicated(cohort_id)) %>%
+  select(all_of(var_demo_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1)) %>% 
+  modify_header(label ~ "Characteristic",all_stat_cols() ~ "PSYCH Y2, N={N}")
+
+psych_Y3_demo <- reg_enc_psych %>%
+  filter(time_point == "Y3") %>%
+  filter(!duplicated(cohort_id)) %>%
+  select(all_of(var_demo_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1))%>% 
+  modify_header(label ~ "Characteristic",all_stat_cols() ~ "PSYCH Y3, N={N}")
+
+psych_Y4_demo <- reg_enc_psych %>%
+  filter(time_point == "Y4") %>%
+  filter(!duplicated(cohort_id)) %>%
+  select(all_of(var_demo_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1)) %>% 
+  modify_header(label ~ "Characteristic",all_stat_cols() ~ "PSYCH Y4, N={N}")
+
+primary_demo <- reg_enc_primary %>%
+  filter(!duplicated(cohort_id)) %>%
+  select(all_of(var_demo_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1)) %>% 
+  modify_header(label ~ "Characteristic",all_stat_cols() ~ "primary all, N={N}")
+
+primary_Y1_demo <- reg_enc_primary %>%
+  filter(time_point == "Y1") %>%
+  filter(!duplicated(cohort_id)) %>%
+  select(all_of(var_demo_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1))%>% 
+  modify_header(label ~ "Characteristic",all_stat_cols() ~ "primary Y1, N={N}")
+
+primary_Y2_demo <- reg_enc_primary %>%
+  filter(time_point == "Y2") %>%
+  filter(!duplicated(cohort_id)) %>%
+  select(all_of(var_demo_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1)) %>% 
+  modify_header(label ~ "Characteristic",all_stat_cols() ~ "primary Y2, N={N}")
+
+primary_Y3_demo <- reg_enc_primary %>%
+  filter(time_point == "Y3") %>%
+  filter(!duplicated(cohort_id)) %>%
+  select(all_of(var_demo_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1))%>% 
+  modify_header(label ~ "Characteristic",all_stat_cols() ~ "primary Y3, N={N}")
+
+primary_Y4_demo <- reg_enc_primary %>%
+  filter(time_point == "Y4") %>%
+  filter(!duplicated(cohort_id)) %>%
+  select(all_of(var_demo_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1)) %>% 
+  modify_header(label ~ "Characteristic",all_stat_cols() ~ "primary Y4, N={N}")
+
+primary_by_years <- tbl_merge(list(primary_demo, primary_Y1_demo,primary_Y2_demo ,primary_Y3_demo ,primary_Y4_demo ))
+
+psych_by_years <- tbl_merge(list(psych_demo, psych_Y1_demo,psych_Y2_demo ,psych_Y3_demo ,psych_Y4_demo ))
+
+```
+
+### Encounter level characteristics (Table S5)
+
+```{r}
+var_enc_list=c("telehealth","day","daytime_grp")
+
+psych_enc <- reg_enc_psych %>% ungroup() %>%
+  select(all_of(var_enc_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1))  %>% 
+  modify_header(label ~ "Characteristic",all_stat_cols() ~ "PSYCH all, N={N}")
+
+
+psych_Y1_enc <- reg_enc_psych %>%
+  filter(time_point == "Y1") %>%
+  select(all_of(var_enc_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1)) %>% 
+  modify_header(label ~ "Characteristic",all_stat_cols() ~ "PSYCH Y1, N={N}")
+
+psych_Y2_enc <- reg_enc_psych %>%
+  filter(time_point == "Y2") %>%
+  select(all_of(var_enc_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1))  %>% 
+  modify_header(label ~ "Characteristic",all_stat_cols() ~ "PSYCH Y2, N={N}")
+psych_Y3_enc <- reg_enc_psych %>%
+  filter(time_point == "Y3") %>%
+  select(all_of(var_enc_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1)) %>% 
+  modify_header(label ~ "Characteristic",all_stat_cols() ~ "PSYCH Y3, N={N}")
+
+psych_Y4_enc <- reg_enc_psych %>%
+  filter(time_point == "Y4") %>%
+  select(all_of(var_enc_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1))  %>% 
+  modify_header(label ~ "Characteristic",all_stat_cols() ~ "PSYCH Y4, N={N}")
+
+primary_enc <- reg_enc_primary %>% ungroup() %>% 
+  select(all_of(var_enc_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1)) %>% 
+  modify_header(label ~ "Characteristic",all_stat_cols() ~ "primary all, N={N}")
+
+primary_Y1_enc <- reg_enc_primary %>%
+  filter(time_point == "Y1") %>%
+  select(all_of(var_enc_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1)) %>% 
+  modify_header(label ~ "Characteristic",all_stat_cols() ~ "primary Y1, N={N}")
+
+primary_Y2_enc <- reg_enc_primary %>%
+  filter(time_point == "Y2") %>%
+  select(all_of(var_enc_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1))  %>% 
+  modify_header(label ~ "Characteristic",all_stat_cols() ~ "primary Y2, N={N}")
+
+primary_Y3_enc <- reg_enc_primary %>%
+  filter(time_point == "Y3") %>%
+  select(all_of(var_enc_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1)) %>% 
+  modify_header(label ~ "Characteristic",all_stat_cols() ~ "primary Y3, N={N}")
+
+primary_Y4_enc <- reg_enc_primary %>%
+  filter(time_point == "Y4") %>%
+  select(all_of(var_enc_list)) %>%
+  tbl_summary(label = var_labels_desc,digits = all_categorical() ~ c(0,1))  %>% 
+  modify_header(label ~ "Characteristic",all_stat_cols() ~ "primary Y4, N={N}")
+
+primary_by_years_enc <- tbl_merge(list(primary_enc, primary_Y1_enc,primary_Y2_enc ,primary_Y3_enc ,primary_Y4_enc ))
+psych_by_years_enc<- tbl_merge(list(psych_enc, psych_Y1_enc,psych_Y2_enc ,psych_Y3_enc ,psych_Y4_enc ))
+
+```
+
+### Number of patients in both cohorts (also in table S4)
+```{r}
+reg_enc_combo <- rbind(reg_enc_psych,reg_enc_primary) 
+reg_enc_combo %>% select(cohort_id, program) %>% unique() %>% count(cohort_id) %>% filter(n>1) %>% nrow()
+```
+
+### Number of patients in psych cohort in all time periods
+```{r}
+reg_enc_psych %>% select(cohort_id, time_point) %>% unique() %>% count(cohort_id) %>% filter(n==4) %>% nrow()
+```
+
+### Number of patients in primary cohort in all time periods
+```{r}
+reg_enc_primary %>% select(cohort_id, time_point) %>% unique() %>% count(cohort_id) %>% filter(n==4) %>% nrow()
+```
+
+### Figure S3 Distribution of ADI among patients
+```{r adi_dist}
+reg_enc_combo <- rbind(reg_enc_psych,reg_enc_primary)
+
+reg_enc_combo %>% select(cohort_id,adi_nat,ADI_group,program) %>% unique() %>% relabel_program() %>% ggplot() + geom_histogram(aes(x=adi_nat,fill=ADI_group),bins=100) +
+  xlab("ADI (National Percentile) 2020") + theme_bw() + facet_wrap(.~program) + 
+   scale_fill_manual(name="ADI Group",breaks=c("Low deprivation","Medium deprivation","High deprivation"),
+                    values=c("#FABF7B","#E05C5C","#6E005F"))+  theme(legend.position=c(.85,.82),
+        legend.background = element_rect(colour = "black")) + 
+  ylab("N")
+
+ggsave(here("figures","figure_S3_ADI_dist_2020-2024.png"))
+```
+
+### Figure 2 ADI telehealth trends monthly 
+
+```{r adiplt4}
+characteristic <- "ADI_group"
+time_level <- "month"
+tmp <- reg_enc_combo %>%
+    filter(!is.na(!!sym(characteristic))) %>%
+    group_by(!!sym(time_level),year,!!sym(characteristic),program) %>%
+    summarize(first_day = min(contact_date),
+              n = n(),
+              telehealth = sum(appt_cat=="Telehealth")/n()*100)
+
+tmp %>%   
+  relabel_program() %>% 
+    ggplot() + geom_line(aes(first_day,telehealth,colour=!!sym(characteristic)),size=.5) +
+    geom_point(aes(first_day,telehealth,colour=!!sym(characteristic)),size=.75) +
+    facet_wrap(vars(program)) +
+    scale_colour_manual(name="ADI Group",breaks=c("Low deprivation","Medium deprivation","High deprivation"),
+                    values=c("#FABF7B","#E05C5C","#6E005F"))+
+
+    xlab("") + ylab("% Telehealth") +
+  scale_y_continuous(limits=c(0,100))+ theme_bw()+
+  scale_x_continuous(breaks=c(as_date("2016-07-01"),as_date("2017-07-01"),as_date("2018-07-01"),as_date("2019-07-01"),as_date("2020-07-01"),as_date("2021-07-01"),as_date("2022-07-01"),as_date("2023-07-01"),as_date("2024-07-01")),
+                     labels = paste("July",2016:2024)) + 
+
+  theme(legend.position=c(.83,.18),axis.text.x = element_text(angle = 60, hjust=1),
+        legend.background = element_rect(colour = "black"))  
+
+ggsave(here("figures","figure2_adi_trends.png"),width=8,height=5)
+
+```
+
+## GEE models
+
+### Main models
+```{r}
+main_formula <- as.formula("telehealth ~ (ADI_group + t_weeks) * time_point + age_cat + gender + race + ethnicity + marital_status + mode_payor_cat +  employ + urban + co_anx + co_sud +  day + daytime_grp + I(log(hosp))")
+
+nointeract_formula <- as.formula("telehealth ~ ADI_group + t_weeks*time_point + age_cat + gender + race + ethnicity + marital_status + mode_payor_cat +  employ + urban + co_anx + co_sud +  day + daytime_grp + I(log(hosp))")
+
+gee_psych_nointeract_main <- geeglm(nointeract_formula, id = cohort_id,
+                        data = reg_enc_psych, 
+                        family = binomial(link = "logit"),corstr="exchangeable")
+summary(gee_psych_nointeract_main)
+
+gee_primary_nointeract_main <- geeglm(nointeract_formula, id = cohort_id,
+                        data = reg_enc_primary, 
+                        family = binomial(link = "logit"),corstr="exchangeable")
+
+summary(gee_psych_nointeract_main)
+
+gee_psych_interact_main <- geeglm(main_formula, id = cohort_id,
+                        data = reg_enc_psych, 
+                        family = binomial(link = "logit"),corstr="exchangeable")
+summary(gee_psych_interact_main)
+
+gee_primary_interact_main <- geeglm(main_formula, id = cohort_id,
+                        data = reg_enc_primary, 
+                        family = binomial(link = "logit"),corstr="exchangeable")
+summary(gee_primary_interact_main)
+```
+
+### Supplemental models 
+```{r}
+### supplemental model formulas 
+ADIandtimeonly_formula <- as.formula("telehealth ~ ADI_group*time_point + time_point*t_weeks")
+
+full_formula <- as.formula("telehealth ~ (ADI_group + t_weeks + age_cat + gender + race + ethnicity + marital_status + mode_payor_cat +  employ + urban + co_anx + co_sud +  day + daytime_grp + I(log(hosp))) * time_point")
+
+
+gee_psych_nointeract_ADIandtimeonly <- geeglm(telehealth ~ ADI_group + t_weeks*time_point, id = cohort_id,
+                        data = reg_enc_psych, 
+                        family = binomial(link = "logit"),corstr="exchangeable")
+
+gee_primary_nointeract_ADIandtimeonly <- geeglm(telehealth ~  ADI_group + t_weeks*time_point, id = cohort_id,
+                        data = reg_enc_primary, 
+                        family = binomial(link = "logit"),corstr="exchangeable")
+
+gee_psych_interact_ADIandtimeonly <- geeglm(ADIandtimeonly_formula, id = cohort_id,
+                        data = reg_enc_psych, 
+                        family = binomial(link = "logit"),corstr="exchangeable")
+
+gee_psych_interact_full <- geeglm(full_formula, id = cohort_id,
+                        data = reg_enc_psych, 
+                        family = binomial(link = "logit"),corstr="exchangeable")
+
+gee_primary_interact_ADIandtimeonly <- geeglm(ADIandtimeonly_formula, id = cohort_id,
+                        data = reg_enc_primary, 
+                        family = binomial(link = "logit"),corstr="exchangeable")
+
+
+gee_primary_interact_full <- geeglm(full_formula, id = cohort_id,
+                        data = reg_enc_primary, 
+                        family = binomial(link = "logit"),corstr="exchangeable")
+```
+
+
+```{r eval=FALSE}
+save_models_as <- here("data","tele_models_gee.rds")
+readr::write_rds(list(
+  "gee_psych_interact_ADIandtimeonly"= gee_psych_interact_ADIandtimeonly,
+  "gee_psych_interact_full"= gee_psych_interact_full,
+  "gee_psych_interact_main"= gee_psych_interact_main,
+  "gee_psych_nointeract_ADIandtimeonly"= gee_psych_nointeract_ADIandtimeonly,
+  "gee_psych_nointeract_main"= gee_psych_nointeract_main,
+
+  "gee_primary_interact_ADIandtimeonly"= gee_primary_interact_ADIandtimeonly,
+  "gee_primary_interact_full"= gee_primary_interact_full,
+  "gee_primary_interact_main"= gee_primary_interact_main,
+  "gee_primary_nointeract_ADIandtimeonly"= gee_primary_nointeract_ADIandtimeonly,
+  "gee_primary_nointeract_main"=gee_primary_nointeract_main),
+ save_models_as)
+```
+
+### Get linear combinations with marginaleffects 
+```{r}
+### Main models
+comparisons_psych_main <- marginaleffects::comparisons(gee_psych_interact_main,comparison="lnoravg",transform="exp",variables = "ADI_group",by=c("time_point")) %>% mutate(program="PSYCH",type="Main")
+
+comparisons_primary_main <- marginaleffects::comparisons(gee_primary_interact_main,comparison="lnoravg",transform="exp",variables = "ADI_group",by=c("time_point")) %>% mutate(program="primary",type="Main")
+
+### Supplemental models
+
+comparisons_psych_ADIandtimeonly<- marginaleffects::comparisons(gee_psych_interact_ADIandtimeonly,comparison="lnoravg",transform="exp",variables = "ADI_group",by=c("time_point")) %>% mutate(program="PSYCH",type="Unadjusted")
+  
+comparisons_psych_full <- marginaleffects::comparisons(gee_psych_interact_full,comparison="lnoravg",transform="exp",variables = "ADI_group",by=c("time_point"))%>% mutate(program="PSYCH",type="Time interacted")
+
+comparisons_primary_ADIandtimeonly <- marginaleffects::comparisons(gee_primary_interact_ADIandtimeonly,comparison="lnoravg",transform="exp",variables = "ADI_group",by=c("time_point")) %>% mutate(program="primary",type="Unadjusted")
+
+comparisons_primary_full <- marginaleffects::comparisons(gee_primary_interact_full,comparison="lnoravg",transform="exp",variables = "ADI_group",by=c("time_point")) %>% mutate(program="primary",type="Time interacted")
+
+```
+
+## Model figures 
+
+### OR figure 3
+```{r}
+main_model_comparisons <- 
+  rbind(comparisons_psych_main,comparisons_primary_main) %>% 
+  mutate(contrast_label = case_when(
+    grepl(x = contrast,pattern="Medium deprivation") ~ "Medium v. High deprivation",
+    grepl(x = contrast,pattern="Low deprivation") ~ "Low v. High deprivation",
+  )) %>% 
+  mutate(time_point_label = case_when(
+    time_point == "Y1" ~ "Jul. 2020- Jun. 2021",
+    time_point == "Y2" ~ "Jul. 2021- Jun. 2022",
+    time_point == "Y3" ~ "Jul. 2022- Jun. 2023",
+    time_point == "Y4" ~ "Jul. 2023- Jun. 2024"))
+
+main_model_comparisons%>%
+  relabel_program() %>% 
+      ggplot() +
+      geom_hline(yintercept=1,linetype="dashed") + 
+      geom_point(aes(x=time_point_label, y=estimate, colour=contrast_label),
+                 position=position_dodge(width=.25),size=2) +
+      geom_errorbar(aes(x=time_point_label,ymin=conf.low,ymax=conf.high,colour=contrast_label),width=.25,
+                    position=position_dodge(width=.25)) +
+      facet_grid(cols=vars(program),scales="free_x",space="free_x")
+      theme_bw() +
+      theme(legend.position=c(.66,.85),
+            axis.text.x = element_text(angle = 60, hjust=1),
+        legend.background = element_rect(colour = "black"),
+        legend.text = element_text(size=8),
+        legend.title = element_text(size=8),
+        legend.key.size = unit(.5, "cm")) + 
+        
+        
+  scale_colour_manual(name = "Comparison",
+                      breaks=c("Low v. High deprivation","Medium v. High deprivation"),
+                      values=c("#FABF7B","#E05C5C"))+
+      labs(color = "ADI group") +
+      xlab("")+ 
+      ylab("Odds Ratio (95% CI)") 
+
+ggsave(here("figures","figure3_OR.png"))
+```
+
+
+### Supplemental OR plot (figure S5)
+
+```{r}
+six_model_comparisons <- 
+  rbind(comparisons_psych_main,comparisons_primary_main,
+        comparisons_psych_full,comparisons_primary_full,
+        comparisons_psych_ADIandtimeonly,comparisons_primary_ADIandtimeonly) %>% 
+  mutate(contrast_label = case_when(
+    grepl(x = contrast,pattern="Medium deprivation") ~ "Medium v. High deprivation",
+    grepl(x = contrast,pattern="Low deprivation") ~ "Low v. High deprivation",
+  )) %>% 
+  mutate(time_point_label = case_when(
+    time_point == "Y1" ~ "Jul. 2020- Jun. 2021",
+    time_point == "Y2" ~ "Jul. 2021- Jun. 2022",
+    time_point == "Y3" ~ "Jul. 2022- Jun. 2023",
+    time_point == "Y4" ~ "Jul. 2023- Jun. 2024"))
+
+six_model_comparisons%>%
+  relabel_program() %>% 
+      ggplot() +
+      geom_hline(yintercept=1,linetype="dashed") + 
+            geom_errorbar(aes(x=time_point_label,ymin=conf.low,ymax=conf.high,colour=contrast_label,linetype=type),width=.25,
+                    position=position_dodge(width=.5)) +
+  geom_point(aes(x=time_point_label, y=estimate, colour=contrast_label,linetype=type,shape=type),
+                 position=position_dodge(width=.5),size=2) +
+
+      facet_grid(cols=vars(program),rows=vars(contrast_label),scales="free_x",space="free_x")
+      theme_bw() +
+      theme(
+            axis.text.x = element_text(angle = 60, hjust=1),
+        legend.background = element_rect(colour = "black"),
+        legend.text = element_text(size=8),
+        legend.title = element_text(size=8),
+        legend.key.size = unit(.75, "cm")) + 
+  scale_linetype_manual(name="Model Specification",
+                          breaks=c("Main","Time interacted","Unadjusted"),
+                          values=c("solid","dotted","dashed"),
+                          labels=c("Main","Time period *\n covariates","No covariate\n adjustment")) + 
+ scale_shape_manual(name="Model Specification",
+                          breaks=c("Main","Time interacted","Unadjusted"),
+                          values=c(16,1,10),
+                          labels=c("Main","Time period *\n covariates","No covariate\n adjustment")) + 
+  scale_colour_manual(name = "Comparison",
+                      breaks=c("Low v. High deprivation","Medium v. High deprivation"),
+                      labels=c("Low v. High\n deprivation","Medium v. High\n deprivation"),
+                      values=c("#FABF7B","#E05C5C"))+
+      labs(color = "ADI group") +
+      xlab("")+ 
+      ylab("Odds Ratio (95% CI)") 
+
+ggsave(here("figures","figure_S5_OR_figure_sixmods.png"),width=7,height=7)
+```
+
+## Model tables 
+
+```{r}
+var_labels_interact_or <- list( "ADI_group"="ADI Group",
+                                "time_point:ADI_group" = "Time Period * ADI Group",
+                                "time_point" = "Time Period",
+                                "t_weeks" = "Years",
+                                "t_weeks:time_point" = "Time Period * Years",
+                               "age_cat"="Age Category",
+                               "gender"="Gender",
+                               "race"="Race",
+                               "marital_status"="Marital Status",
+                               "mode_payor_cat"="Modal Insurance Type",
+                               "employ"="Employment",
+                               "day"="Day of Week",
+                               "daytime_grp"="Time of Day",
+                               "co_anx"="Comorbid Anxiety",
+                               "co_sud"="Comorbid SUD",
+                               "age_cat:time_point" = "Time Period * Age",
+                               "time_point:gender" = "Time Period * Gender",
+                               "time_point:race" = "Time Period * Race",
+                                "time_point:ethnicity" = "Time Period * Ethnicity",
+                                 "time_point:urban" = "Time Period * Urbanicity",
+                               "time_point:mode_payor_cat" = "Time Period * Insurance",
+                                "time_point:I(log(hosp))" = "Time Period * log(Hospitalizations)",
+                               "time_point:employ" = "Time Period * Employment",
+                               "time_point:day" = "Time Period * Day of week",
+                               "time_point:daytime_grp" = "Time Period * Time of Day",
+                               "time_point:co_anx" = "Time Period * Anxiety",
+                               "time_point:co_sud" = "Time Period * SUD")
+```
+
+
+### Table S6: Full time period models (no interaction with time_point OTHER THAN for t_weeks)
+```{r}
+gee_psych_nointeract_table_main <- tbl_regression(gee_psych_nointeract_main,exponentiate=TRUE,label=var_labels_interact_or,  pvalue_fun = label_style_pvalue(digits = 2))
+
+gee_primary_nointeract_table_main <- tbl_regression(gee_primary_nointeract_main,exponentiate=TRUE,label=var_labels_interact_or,pvalue_fun = label_style_pvalue(digits = 2))
+```
+
+### Not included in paper: pooled over time but without other covariates
+```{r}
+gee_psych_nointeract_table_ADIandtimeonly <- tbl_regression(gee_psych_nointeract_ADIandtimeonly,exponentiate=TRUE,label=var_labels_interact_or,pvalue_fun = label_style_pvalue(digits = 2))
+
+gee_primary_nointeract_table_ADIandtimeonly <- tbl_regression(gee_primary_nointeract_ADIandtimeonly,exponentiate=TRUE,label=var_labels_interact_or,pvalue_fun = label_style_pvalue(digits = 2))
+```
+
+### Table S8: Interacted models
+```{r}
+gee_psych_interact_table_main <- tbl_regression(gee_psych_interact_main,exponentiate=TRUE,label=var_labels_interact_or,pvalue_fun = label_style_pvalue(digits = 2))
+
+gee_primary_interact_table_main <- tbl_regression(gee_primary_interact_main,exponentiate=TRUE,label=var_labels_interact_or,pvalue_fun = label_style_pvalue(digits = 2))
+```
+
+### Table S9: Interacted models without other covariates
+```{r}
+gee_psych_interact_table_ADIandtimeonly <- tbl_regression(gee_psych_interact_ADIandtimeonly,exponentiate=TRUE,label=var_labels_interact_or,pvalue_fun = label_style_pvalue(digits = 2))
+
+gee_primary_interact_table_ADIandtimeonly <- tbl_regression(gee_primary_interact_ADIandtimeonly,exponentiate=TRUE,label=var_labels_interact_or,pvalue_fun = label_style_pvalue(digits = 2))
+
+```
+
+### Table S10: Interacted models, time interacted with all covariates
+```{r}
+gee_psych_interact_table_full <- tbl_regression(gee_psych_interact_full,exponentiate=TRUE,label=var_labels_interact_or,pvalue_fun = label_style_pvalue(digits = 2))
+
+gee_primary_interact_table_full <- tbl_regression(gee_primary_interact_full,exponentiate=TRUE,label=var_labels_interact_or,pvalue_fun = label_style_pvalue(digits = 2))
+```
+
+### Table 7 + some extra info 
+```{r}
+p_label <- function(p) {
+  ifelse(p < 0.001, "<0.001",
+         ifelse(p < 0.01, "<0.01",as.character(round(p,2))))
+}
+
+est_round <- function(estimate) {
+  style_ratio(estimate,digits=2)
+}
+
+full<- rbind(mutate(gee_primary_nointeract_table$table_body,program="primary",time_point="across_time"),
+             mutate(gee_psych_nointeract_table$table_body,program="PSYCH",time_point="across_time")) %>% filter(variable %in% c("ADI_group"),!reference_row) %>% select(label,estimate,ci,p.value,program,time_point)  %>% mutate(estimate = est_round(estimate),type="aOR",
+         p.value=p_label(p.value))%>% rename(ADI_group=label) %>%
+  pivot_wider(names_from = time_point, id_cols = c("ADI_group","program","type"),values_from = c("estimate","ci","p.value"))
+
+interact_lincombo_or <- rbind(comparisons_primary_main,comparisons_psych_main) %>% as_tibble() %>%
+  mutate(ADI_group = case_when(
+    grepl(x = contrast,pattern="Medium deprivation") ~ "Medium deprivation",
+    grepl(x = contrast,pattern="Low deprivation") ~ "Low deprivation",
+  )) %>%  mutate(ci=paste0(est_round(conf.low),", ",est_round(conf.high))) %>%
+  select(ADI_group,estimate,ci,p.value,program,time_point)  %>%
+  mutate(estimate = est_round(estimate),
+         time_point=paste0("limcomb_",time_point),
+         p.value=p_label(p.value),
+         type="aOR") %>% 
+  pivot_wider(names_from = time_point, id_cols = c("ADI_group","program","type"),values_from = c("estimate","ci","p.value"))
+interact_ratio <-  rbind(mutate(gee_primary_interact_table_main$table_body,program="primary",time_point="both"),
+             mutate(gee_psych_interact_table_main$table_body,program="PSYCH",time_point="interact")) %>% 
+   filter(variable %in% c("ADI_group:time_point"),!is.na(estimate)) %>% select(label,estimate,ci,p.value,program)  %>%  
+  mutate(type="Interaction (Ratio TX/T1)")%>%
+  separate(col = label,sep = " \\* ",into=c("ADI_group","time_point")) %>% 
+  mutate(time_point = paste0("interact_",time_point),
+         estimate=est_round(estimate),
+         p.value=p_label(p.value)) %>%
+  pivot_wider(names_from = time_point, id_cols = c("ADI_group","program","type",),values_from = c("estimate","ci","p.value")) 
+
+t7_main <- left_join(full,interact_lincombo_or,by=c("ADI_group","program"),suffix=c("_nointeract","_lincomb")) %>% left_join(interact_ratio,by=c("ADI_group","program"),suffix=c("","_interact")) %>%  relabel_program() %>% select(-contains("type")) %>%
+  
+  relocate(ADI_group,program,contains("across_time"),contains("Y1"),contains("Y2"),contains("Y3"),contains("Y4")) 
+
+t7_main
+```
+
+
+### equivalent of Table 7 but with full interacted model (not included in paper)
+```{r}
+full_full<- rbind(mutate(gee_primary_nointeract_table$table_body,program="primary",time_point="across_time"),
+             mutate(gee_psych_nointeract_table$table_body,program="PSYCH",time_point="across_time")) %>% filter(variable %in% c("ADI_group"),!reference_row) %>% select(label,estimate,ci,p.value,program,time_point)  %>% mutate(estimate = est_round(estimate),type="aOR",
+         p.value=p_label(p.value))%>% rename(ADI_group=label) %>%
+  pivot_wider(names_from = time_point, id_cols = c("ADI_group","program","type"),values_from = c("estimate","ci","p.value"))
+
+interact_lincombo_or_full <- rbind(comparisons_primary_full,comparisons_psych_full) %>% as_tibble() %>%
+  mutate(ADI_group = case_when(
+    grepl(x = contrast,pattern="Medium deprivation") ~ "Medium deprivation",
+    grepl(x = contrast,pattern="Low deprivation") ~ "Low deprivation",
+  )) %>%  mutate(ci=paste0(est_round(conf.low),", ",est_round(conf.high))) %>%
+  select(ADI_group,estimate,ci,p.value,program,time_point)  %>%
+  mutate(estimate = est_round(estimate),
+         time_point=paste0("limcomb_",time_point),
+         p.value=p_label(p.value),
+         type="aOR") %>% 
+  pivot_wider(names_from = time_point, id_cols = c("ADI_group","program","type"),values_from = c("estimate","ci","p.value"))
+
+interact_ratio_full <-  rbind(mutate(gee_primary_interact_table_full$table_body,program="primary",time_point="both"),
+             mutate(gee_psych_interact_table_full$table_body,program="PSYCH",time_point="interact")) %>%
+  filter(variable %in% c("ADI_group:time_point"),!is.na(estimate)) %>% select(label,estimate,ci,p.value,program)  %>% mutate(type="Interaction (Ratio TX/T1)")%>%
+  separate(col = label,sep = " \\* ",into=c("ADI_group","time_point")) %>% 
+  mutate(time_point = paste0("interact_",time_point),
+         estimate=est_round(estimate),
+         p.value=p_label(p.value)) %>%
+  pivot_wider(names_from = time_point, id_cols = c("ADI_group","program","type",),values_from = c("estimate","ci","p.value")) 
+
+t7_full <- left_join(full_full,interact_lincombo_or_full,by=c("ADI_group","program")) %>% left_join(interact_ratio_full,by=c("ADI_group","program")) %>%  relabel_program() %>% select(-contains("type"))  %>%
+  
+  relocate(ADI_group,program,contains("across_time"),contains("Y1"),contains("Y2"),contains("Y3"),contains("Y4"))
+
+```
+
+### equivalent of Table 7 but with out covariates (not included in paper)
+
+```{r}
+full_ADIandtimeonly<- rbind(mutate(gee_primary_nointeract_table_ADIandtimeonly$table_body,program="primary",time_point="across_time"),
+             mutate(gee_psych_nointeract_table_ADIandtimeonly$table_body,program="PSYCH",time_point="across_time"))  %>% filter(variable %in% c("ADI_group"),!reference_row) %>% select(label,estimate,ci,p.value,program,time_point)  %>% mutate(estimate = est_round(estimate),type="aOR",
+         p.value=p_label(p.value))%>% rename(ADI_group=label) %>%
+  pivot_wider(names_from = time_point, id_cols = c("ADI_group","program","type"),values_from = c("estimate","ci","p.value"))
+
+interact_lincombo_or_ADIandtimeonly <- rbind(comparisons_primary_ADIandtimeonly,comparisons_psych_ADIandtimeonly) %>%  mutate(ADI_group = case_when(
+    grepl(x = contrast,pattern="Medium deprivation") ~ "Medium deprivation",
+    grepl(x = contrast,pattern="Low deprivation") ~ "Low deprivation",
+  )) %>%  mutate(ci=paste0(est_round(conf.low),", ",est_round(conf.high))) %>%
+  select(ADI_group,estimate,ci,p.value,program,time_point)  %>%
+  mutate(estimate = est_round(estimate),
+         time_point=paste0("limcomb_",time_point),
+         p.value=p_label(p.value),
+         type="aOR") %>% 
+  pivot_wider(names_from = time_point, id_cols = c("ADI_group","program","type"),values_from = c("estimate","ci","p.value"))                   
+interact_ratio_ADIandtimeonly <-  rbind(mutate(gee_primary_interact_table_ADIandtimeonly$table_body,program="primary",time_point="both"),
+             mutate(gee_psych_interact_table_ADIandtimeonly$table_body,program="PSYCH",time_point="interact")) %>%
+   filter(variable %in% c("ADI_group:time_point"),!is.na(estimate)) %>% select(label,estimate,ci,p.value,program)  %>% mutate(type="Interaction (Ratio TX/T1)")%>%
+  separate(col = label,sep = " \\* ",into=c("ADI_group","time_point")) %>% 
+  mutate(time_point = paste0("interact_",time_point),
+         estimate=est_round(estimate),
+         p.value=p_label(p.value)) %>%
+  pivot_wider(names_from = time_point, id_cols = c("ADI_group","program","type",),values_from = c("estimate","ci","p.value")) 
+
+
+t7_ADIandtimeonly <- left_join(full_ADIandtimeonly,interact_lincombo_or_ADIandtimeonly,by=c("ADI_group","program"),suffix=c("_nointeract","_lincomb")) %>% left_join(interact_ratio_ADIandtimeonly,by=c("ADI_group","program"),suffix=c("","_interact")) %>%  relabel_program() %>% select(-contains("type"))  %>%
+  
+  relocate(ADI_group,program,contains("across_time"),contains("Y1"),contains("Y2"),contains("Y3"),contains("Y4"))
+
+t7_ADIandtimeonly
+```
+
+```{r eval=FALSE,warning=FALSE,message=FALSE}
+writexl::write_xlsx(
+  list(
+    table_S4_primarycare=primary_by_years %>% as_tibble(),
+    table_S4_psychiatry=psych_by_years%>% as_tibble(),
+    table_S5_primarycare=primary_by_years_enc%>% as_tibble(),
+    table_S5_psychiatry=psych_by_years_enc%>% as_tibble(),
+    table_S6_pooled_primarycare = gee_primary_nointeract_table%>% as_tibble(),
+    table_S6_pooled_psychiatry =  gee_psych_nointeract_table%>% as_tibble(),
+    table_S7_OR_table_main = t7_main,
+    table_S8_main_primarycare =  gee_primary_interact_table_main%>% as_tibble(),
+    table_S8_main_psychiatry =  gee_psych_interact_table_main%>% as_tibble(),
+    table_S9_supp1_primarycare =  gee_primary_interact_table_ADIandtimeonly%>% as_tibble(), 
+    table_S9_supp1_psychiatry = gee_psych_interact_table_ADIandtimeonly%>% as_tibble(),
+    table_S10_supp2_primarycare =  gee_primary_interact_table_full%>% as_tibble(),
+    table_S10_supp2_psychiatry =  gee_psych_interact_table_full%>% as_tibble(),
+    extra_OR_table_ADIandtimeonly =t7_ADIandtimeonly,
+    extra_OR_table_extra_interact = t7_full
+    ),
+  path= here("RQ2.xlsx"))
+```

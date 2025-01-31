@@ -1,0 +1,112 @@
+---
+title: "ADI maps for supplement"
+author: Grace Ringlein
+output: html_document
+date: "2024-11-20"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(readr)
+library(here)
+```
+
+```{r}
+ADI_2020 <- read_csv("~/WINDOWS/uvdi/Desktop/telehealth/data/externaldata/MD_2020_ADI_Census_Block_Group_v4_0_1.csv",show_col_types=FALSE) %>%
+  mutate(GEOID = as.character(FIPS))
+
+bg_geom <-   tigris::block_groups(state="MD",year="2020")
+water <- tigris::area_water(state="MD",county = unique(bg_geom$COUNTYFP))
+counties <- tigris::counties(state="MD",year="2020")
+
+ADI_2020_geom <- bg_geom %>%
+  left_join(ADI_2020,by="GEOID") %>%
+  mutate(adi_nat = as.integer(ADI_NATRANK),
+         ADI_group = factor(case_when(
+           is.na(adi_nat)~ "Undefined",
+           adi_nat <= 25 ~ "Low deprivation",
+          adi_nat <= 75 ~ "Medium deprivation",
+           adi_nat <= 100 ~ "High deprivation",
+           ),levels=c("High deprivation","Medium deprivation","Low deprivation","Undefined"))) 
+```
+
+
+```{r}
+baltcity_water <- tigris::area_water(state="24", county="510",year="2020")
+
+ADI_2020_geom %>% filter(COUNTYFP %in% c("510")) %>% ggplot() +
+  geom_sf(aes(fill=ADI_group,geometry=geometry),colour="black") + 
+  geom_sf(data=baltcity_water,aes(fill="Water"),colour="#77C5C0") + 
+  geom_sf(aes(geometry=geometry),colour="black",fill=NA) + 
+  scale_fill_manual(name="ADI group",
+                    breaks=c("Low deprivation","Medium deprivation","High deprivation","Undefined","Water"),
+                    values=c("#FABF7B","#E05C5C","#6E005F","#EEEEEE","#E2FFFD")) +
+  theme_void() 
+
+ggsave(here::here("adi_baltimore_map_rev.png"),width=5,height=5)
+```
+
+```{r}
+ADI_2020_geom %>% ggplot() +
+  geom_sf(aes(fill=ADI_group,geometry=geometry),colour=NA) + 
+  geom_sf(data=water,aes(fill="Water"),colour=NA) + 
+  geom_sf(data=counties,aes(geometry=geometry),colour="black",fill=NA) + 
+  scale_fill_manual(name="ADI group",
+                    breaks=c("Low deprivation","Medium deprivation","High deprivation","Undefined","Water"),
+                    values=c("#FABF7B","#E05C5C","#6E005F","#EEEEEE","#E2FFFD"))  + 
+  theme_void()
+
+citation("tigris")
+packageVersion("tigris")
+ggsave(here::here("adi_MD_rev.png"),width=7,height=5)
+```
+
+
+```{r}
+ADI_2020_geom %>% ggplot() +
+  geom_sf(aes(fill=ADI_group,geometry=geometry),colour=NA) + 
+  geom_sf(data=water,aes(fill="Water"),colour="#77C5C0") + 
+  geom_sf(data=counties,aes(geometry=geometry),colour="black",fill=NA) + 
+  scale_fill_manual(name="ADI group",
+                    breaks=c("Low deprivation","Medium deprivation","High deprivation","Undefined","Water"),
+                    values=c("#FABF7B","#E05C5C","#6E005F","#EEEEEE","#E2FFFD")) +
+  theme_void() 
+
+ggsave(here::here("adi_MD_wateroutline_rev.png"),width=7,height=5)
+```
+
+
+```{r}
+ADI_2020_geom %>% mutate(adi_nat = 
+                           (adi_nat - min(adi_nat,na.rm=TRUE))/(max(adi_nat,na.rm=TRUE)-min(adi_natna.rm=TRUE))) %>%
+  ggplot() +
+  
+  geom_sf(aes(fill=adi_nat,geometry=geometry),colour=NA) + 
+  geom_sf(data=water,fill="#C5E1EF") + 
+  geom_sf(data=counties,aes(geometry=geometry),colour="black",fill=NA) + 
+  scale_fill_gradient2(name="ADI group",
+                      high="#6E005F",mid="#E05C5C", low="#FCE1A4")+ coord_sf(xlim=c(-77,-76),ylim=c(38.7,39.7))
+
+
+ADI_2020_geom %>% mutate(adi_nat = 
+                           (adi_nat - min(adi_nat,na.rm=TRUE))/(max(adi_nat,na.rm=TRUE)-min(adi_natna.rm=TRUE))) %>%
+  filter(COUNTYFP %in% c("510")) %>% ggplot() +
+  geom_sf(aes(fill=adi_nat,geometry=geometry),colour="black") + 
+  geom_sf(data=baltcity_water,fill="#E2FFFD",colour="#77C5C0") + 
+  geom_sf(aes(geometry=geometry),colour="black",fill=NA) +  
+  scale_fill_gradient2(name="ADI group",high="#6E005F",mid="#E05C5C", low="#FCE1A4",midpoint=0.5)
+
+```
+
+```{r}
+ADI_2020_geom %>%  ggplot() +
+  geom_sf(aes(fill=ADI_group,colour=ADI_group,geometry=geometry)) + 
+  khroma::scale_fill_vibrant(name="ADI group",scale_name="vibrant") + 
+  khroma::scale_colour_vibrant(name="ADI group",scale_name="vibrant")   +
+  geom_sf(data=water,fill="gray",colour="gray") + 
+  geom_sf(data=counties,colour="black",fill=NA) + 
+  theme_void()
+```
+
+
